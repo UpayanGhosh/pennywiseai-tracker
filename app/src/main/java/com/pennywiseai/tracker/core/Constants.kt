@@ -67,15 +67,11 @@ object Constants {
     }
     
     /**
-     * LLM Model Configuration
+     * LLM model configuration now lives in [com.pennywiseai.tracker.core.LlmModel]
+     * / [com.pennywiseai.tracker.core.LlmModelRegistry] so multiple models can be
+     * offered in the download picker. The selected model is persisted via
+     * UserPreferencesRepository.selectedModelId.
      */
-    object ModelDownload {
-        const val MODEL_URL = "https://pub-fcfb3ffddb184540a758a7fe68249908.r2.dev/Qwen2.5-1.5B-Instruct-q8-ekv4096.litertlm"
-        const val MODEL_FILE_NAME = "Qwen2.5-1.5B-Instruct-q8-ekv4096.litertlm"
-        const val MODEL_SIZE_MB = 1524L
-        const val MODEL_SIZE_BYTES = 1_597_931_520L
-        const val REQUIRED_SPACE_BYTES = 3_195_863_040L // ~3.0GB (2x model size for safety)
-    }
 
     /**
      * External Links

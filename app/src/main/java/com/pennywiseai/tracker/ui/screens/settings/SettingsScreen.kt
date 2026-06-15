@@ -37,6 +37,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pennywiseai.tracker.core.Constants
 import com.pennywiseai.tracker.ui.components.CustomTitleTopAppBar
+import com.pennywiseai.tracker.ui.components.ModelPickerDialog
 import com.pennywiseai.tracker.ui.components.cards.SectionHeaderV2
 import com.pennywiseai.tracker.ui.theme.Dimensions
 import com.pennywiseai.tracker.ui.theme.Spacing
@@ -97,6 +98,8 @@ fun SettingsScreen(
     val downloadProgress by settingsViewModel.downloadProgress.collectAsStateWithLifecycle()
     val downloadedMB by settingsViewModel.downloadedMB.collectAsStateWithLifecycle()
     val totalMB by settingsViewModel.totalMB.collectAsStateWithLifecycle()
+    val selectedModel by settingsViewModel.selectedModel.collectAsStateWithLifecycle()
+    val availableModels = settingsViewModel.availableModels
     val isDeveloperModeEnabled by settingsViewModel.isDeveloperModeEnabled.collectAsStateWithLifecycle(initialValue = false)
     val smsScanMonths by settingsViewModel.smsScanMonths.collectAsStateWithLifecycle(initialValue = 3)
     val smsScanAllTime by settingsViewModel.smsScanAllTime.collectAsStateWithLifecycle(initialValue = false)
@@ -125,6 +128,7 @@ fun SettingsScreen(
     var showDisplayCurrencyDialog by remember { mutableStateOf(false) }
     var showCurrencyDropdown by remember { mutableStateOf(false) }
     var showMainAccountDropdown by remember { mutableStateOf(false) }
+    var showModelPicker by remember { mutableStateOf(false) }
     val permissionUiState by permissionViewModel.uiState.collectAsStateWithLifecycle()
     val hasNotificationAccess = permissionUiState.hasNotificationAccess
     val context = LocalContext.current
@@ -530,7 +534,7 @@ fun SettingsScreen(
                     downloadProgress = downloadProgress,
                     downloadedMB = downloadedMB,
                     totalMB = totalMB,
-                    onDownload = { settingsViewModel.startModelDownload() },
+                    onDownload = { showModelPicker = true },
                     onCancel = { settingsViewModel.cancelDownload() },
                     onDelete = { settingsViewModel.deleteModel() }
                 )
@@ -635,6 +639,19 @@ fun SettingsScreen(
                     Text("Cancel")
                 }
             }
+        )
+    }
+
+    // AI Model Picker Dialog
+    if (showModelPicker) {
+        ModelPickerDialog(
+            models = availableModels,
+            selectedModelId = selectedModel.id,
+            onConfirm = { model ->
+                showModelPicker = false
+                settingsViewModel.selectModelAndDownload(model)
+            },
+            onDismiss = { showModelPicker = false }
         )
     }
 
@@ -1119,7 +1136,7 @@ private fun AiChatSettingsItem(
                     )
                     Text(
                         text = when (downloadState) {
-                            DownloadState.NOT_DOWNLOADED -> "Download AI model (${Constants.ModelDownload.MODEL_SIZE_MB} MB)"
+                            DownloadState.NOT_DOWNLOADED -> "Choose and download an AI model"
                             DownloadState.DOWNLOADING -> "Downloading AI model..."
                             DownloadState.PAUSED -> "Download interrupted"
                             DownloadState.COMPLETED -> "AI model ready for chat"

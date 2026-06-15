@@ -29,6 +29,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pennywiseai.tracker.data.repository.ModelState
 import com.pennywiseai.tracker.ui.components.CustomTitleTopAppBar
+import com.pennywiseai.tracker.ui.components.ModelPickerDialog
 import com.pennywiseai.tracker.ui.components.cards.PennyWiseCardV2
 import com.pennywiseai.tracker.ui.theme.Dimensions
 import com.pennywiseai.tracker.ui.theme.Spacing
@@ -57,11 +58,26 @@ fun ChatScreen(
     val downloadProgress by viewModel.downloadProgress.collectAsStateWithLifecycle()
     val downloadedMB by viewModel.downloadedMB.collectAsStateWithLifecycle()
     val totalMB by viewModel.totalMB.collectAsStateWithLifecycle()
-    
+    val selectedModel by viewModel.selectedModel.collectAsStateWithLifecycle()
+    val availableModels = viewModel.availableModels
+
     var inputText by remember { mutableStateOf("") }
+    var showModelPicker by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
+
+    if (showModelPicker) {
+        ModelPickerDialog(
+            models = availableModels,
+            selectedModelId = selectedModel.id,
+            onConfirm = { model ->
+                showModelPicker = false
+                viewModel.selectModelAndDownload(model)
+            },
+            onDismiss = { showModelPicker = false }
+        )
+    }
     
     // Auto-scroll to bottom when new messages arrive
     LaunchedEffect(messages.size, currentResponse) {
@@ -153,7 +169,7 @@ fun ChatScreen(
                                         Text("Cancel")
                                     }
                                 } else {
-                                    Button(onClick = { viewModel.startModelDownload() }) {
+                                    Button(onClick = { showModelPicker = true }) {
                                         Icon(
                                             Icons.Default.Download,
                                             contentDescription = null,
@@ -256,7 +272,7 @@ fun ChatScreen(
                                     )
                                 }
                                 Button(
-                                    onClick = { viewModel.startModelDownload() },
+                                    onClick = { showModelPicker = true },
                                     modifier = Modifier.padding(start = Spacing.sm)
                                 ) {
                                     Icon(

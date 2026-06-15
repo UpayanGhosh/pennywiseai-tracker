@@ -7,7 +7,8 @@ import android.os.Environment
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pennywiseai.tracker.core.Constants
+import com.pennywiseai.tracker.core.LlmModel
+import com.pennywiseai.tracker.core.LlmModelRegistry
 import com.pennywiseai.tracker.data.database.entity.ChatMessage
 import com.pennywiseai.tracker.data.repository.LlmRepository
 import com.pennywiseai.tracker.data.repository.ModelRepository
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -45,7 +47,7 @@ class ChatViewModel @Inject constructor(
     private val _downloadedMB = MutableStateFlow(0L)
     val downloadedMB: StateFlow<Long> = _downloadedMB.asStateFlow()
 
-    private val _totalMB = MutableStateFlow(Constants.ModelDownload.MODEL_SIZE_MB)
+    private val _totalMB = MutableStateFlow(LlmModelRegistry.DEFAULT.sizeMb)
     val totalMB: StateFlow<Long> = _totalMB.asStateFlow()
 
     private var currentDownloadId: Long? = null
@@ -73,7 +75,19 @@ class ChatViewModel @Inject constructor(
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
-            initialValue = if (modelRepository.isModelDownloaded()) ModelState.READY else ModelState.NOT_DOWNLOADED
+            initialValue = if (modelRepository.isModelDownloaded(LlmModelRegistry.DEFAULT)) ModelState.READY else ModelState.NOT_DOWNLOADED
+        )
+
+    /** Models offered in the download picker. */
+    val availableModels: List<LlmModel> = modelRepository.availableModels
+
+    /** The model the user has selected (persisted), reactive for the picker. */
+    val selectedModel: StateFlow<LlmModel> = userPreferencesRepository.selectedModelId
+        .map { LlmModelRegistry.fromId(it) }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = LlmModelRegistry.DEFAULT
         )
     
     private val _uiState = MutableStateFlow(ChatUiState())
@@ -131,10 +145,9 @@ class ChatViewModel @Inject constructor(
     )
     
     init {
-        modelRepository.checkModelState()
-
-        // Load initial context message for display
+        // Refresh model state against the selected model + load context message
         viewModelScope.launch {
+            modelRepository.checkModelState()
             loadContextMessage()
         }
 
@@ -219,74 +232,90 @@ class ChatViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(error = null)
     }
 
-    fun startModelDownload() {
+    /** Picker entry point: persist the chosen model, then download it. */
+    fun selectModelAndDownload(model: LlmModel) {
         viewModelScope.launch {
-            val existingDownloadId = userPreferencesRepository.getActiveDownloadId()
-            if (existingDownloadId != null) {
-                val query = DownloadManager.Query().setFilterById(existingDownloadId)
-                val cursor = downloadManager.query(query)
-                if (cursor != null && cursor.moveToFirst()) {
-                    val statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
-                    if (statusIndex != -1) {
-                        val status = cursor.getInt(statusIndex)
-                        if (status == DownloadManager.STATUS_RUNNING ||
-                            status == DownloadManager.STATUS_PENDING ||
-                            status == DownloadManager.STATUS_PAUSED
-                        ) {
-                            cursor.close()
-                            currentDownloadId = existingDownloadId
-                            modelRepository.updateModelState(ModelState.DOWNLOADING)
-                            monitorDownload(existingDownloadId)
-                            return@launch
-                        }
-                    }
-                    cursor.close()
-                }
-            }
-
-            val availableSpace = context.filesDir.usableSpace
-            if (availableSpace < Constants.ModelDownload.REQUIRED_SPACE_BYTES) {
-                _uiState.value = _uiState.value.copy(error = "Not enough storage space for download")
-                return@launch
-            }
-
-            // Validate model URL before attempting download
-            val modelUrl = Constants.ModelDownload.MODEL_URL
-            if (modelUrl.isBlank() || !modelUrl.startsWith("http")) {
-                Log.e("ChatViewModel", "Invalid MODEL_URL: '$modelUrl'")
-                modelRepository.updateModelState(ModelState.ERROR)
-                _uiState.value = _uiState.value.copy(error = "AI model download is not available in this build.")
-                return@launch
-            }
-
-            // Clean up any stale partial file — DownloadManager stays PENDING if destination exists
-            val existingFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), Constants.ModelDownload.MODEL_FILE_NAME)
-            if (existingFile.exists()) {
-                existingFile.delete()
-            }
-
-            try {
-                val request = DownloadManager.Request(Uri.parse(modelUrl))
-                    .setTitle("AI Chat Model")
-                    .setDescription("Downloading AI chat assistant for PennyWise")
-                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                    .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, Constants.ModelDownload.MODEL_FILE_NAME)
-                    .setAllowedOverMetered(true)
-                    .setAllowedOverRoaming(false)
-
-                currentDownloadId = downloadManager.enqueue(request)
-                modelRepository.updateModelState(ModelState.DOWNLOADING)
-                userPreferencesRepository.saveActiveDownloadId(currentDownloadId!!)
-                monitorDownload(currentDownloadId!!)
-            } catch (e: Exception) {
-                Log.e("ChatViewModel", "Failed to start download", e)
-                modelRepository.updateModelState(ModelState.ERROR)
-                _uiState.value = _uiState.value.copy(error = "Failed to start download. Please try again.")
-            }
+            modelRepository.selectModel(model.id)
+            _downloadProgress.value = 0
+            _downloadedMB.value = 0
+            _totalMB.value = model.sizeMb
+            startDownloadInternal(model)
         }
     }
 
-    private fun monitorDownload(downloadId: Long) {
+    /** Retry/resume downloading the currently selected model. */
+    fun startModelDownload() {
+        viewModelScope.launch {
+            startDownloadInternal(modelRepository.getSelectedModel())
+        }
+    }
+
+    private suspend fun startDownloadInternal(model: LlmModel) {
+        val existingDownloadId = userPreferencesRepository.getActiveDownloadId()
+        if (existingDownloadId != null) {
+            val query = DownloadManager.Query().setFilterById(existingDownloadId)
+            val cursor = downloadManager.query(query)
+            if (cursor != null && cursor.moveToFirst()) {
+                val statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                if (statusIndex != -1) {
+                    val status = cursor.getInt(statusIndex)
+                    if (status == DownloadManager.STATUS_RUNNING ||
+                        status == DownloadManager.STATUS_PENDING ||
+                        status == DownloadManager.STATUS_PAUSED
+                    ) {
+                        cursor.close()
+                        currentDownloadId = existingDownloadId
+                        modelRepository.updateModelState(ModelState.DOWNLOADING)
+                        monitorDownload(existingDownloadId, model)
+                        return
+                    }
+                }
+                cursor.close()
+            }
+        }
+
+        val availableSpace = context.filesDir.usableSpace
+        if (availableSpace < model.requiredSpaceBytes) {
+            _uiState.value = _uiState.value.copy(error = "Not enough storage space for download")
+            return
+        }
+
+        // Validate model URL before attempting download
+        val modelUrl = model.downloadUrl
+        if (modelUrl.isBlank() || !modelUrl.startsWith("http")) {
+            Log.e("ChatViewModel", "Invalid download URL for ${model.id}: '$modelUrl'")
+            modelRepository.updateModelState(ModelState.ERROR)
+            _uiState.value = _uiState.value.copy(error = "AI model download is not available in this build.")
+            return
+        }
+
+        // Clean up any stale partial file — DownloadManager stays PENDING if destination exists
+        val existingFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), model.fileName)
+        if (existingFile.exists()) {
+            existingFile.delete()
+        }
+
+        try {
+            val request = DownloadManager.Request(Uri.parse(modelUrl))
+                .setTitle("AI Chat Model")
+                .setDescription("Downloading ${model.displayName} for PennyWise")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, model.fileName)
+                .setAllowedOverMetered(true)
+                .setAllowedOverRoaming(false)
+
+            currentDownloadId = downloadManager.enqueue(request)
+            modelRepository.updateModelState(ModelState.DOWNLOADING)
+            userPreferencesRepository.saveActiveDownloadId(currentDownloadId!!)
+            monitorDownload(currentDownloadId!!, model)
+        } catch (e: Exception) {
+            Log.e("ChatViewModel", "Failed to start download", e)
+            modelRepository.updateModelState(ModelState.ERROR)
+            _uiState.value = _uiState.value.copy(error = "Failed to start download. Please try again.")
+        }
+    }
+
+    private fun monitorDownload(downloadId: Long, model: LlmModel) {
         viewModelScope.launch {
             while (isActive && modelState.value == ModelState.DOWNLOADING) {
                 val query = DownloadManager.Query().setFilterById(downloadId)
@@ -301,7 +330,7 @@ class ChatViewModel @Inject constructor(
                         val bytesDownloaded = cursor.getLong(bytesCol)
                         var bytesTotal = cursor.getLong(totalCol)
                         if (bytesTotal <= 0) {
-                            bytesTotal = Constants.ModelDownload.MODEL_SIZE_BYTES
+                            bytesTotal = model.sizeBytes
                         }
                         _downloadProgress.value = (bytesDownloaded * 100 / bytesTotal).toInt()
                         _downloadedMB.value = bytesDownloaded / (1024 * 1024)
@@ -332,6 +361,7 @@ class ChatViewModel @Inject constructor(
     fun checkAndResumeDownload() {
         viewModelScope.launch {
             val savedDownloadId = userPreferencesRepository.getActiveDownloadId() ?: return@launch
+            val model = modelRepository.getSelectedModel()
             val query = DownloadManager.Query().setFilterById(savedDownloadId)
             val cursor = downloadManager.query(query)
             if (cursor != null && cursor.moveToFirst()) {
@@ -346,13 +376,13 @@ class ChatViewModel @Inject constructor(
                         if (bytesCol != -1 && totalCol != -1) {
                             val bytes = cursor.getLong(bytesCol)
                             var total = cursor.getLong(totalCol)
-                            if (total <= 0) total = Constants.ModelDownload.MODEL_SIZE_BYTES
+                            if (total <= 0) total = model.sizeBytes
                             _downloadedMB.value = bytes / (1024 * 1024)
                             _totalMB.value = total / (1024 * 1024)
                             if (total > 0) _downloadProgress.value = (bytes * 100 / total).toInt()
                         }
                         cursor.close()
-                        monitorDownload(savedDownloadId)
+                        monitorDownload(savedDownloadId, model)
                         return@launch
                     }
                 }
@@ -368,11 +398,12 @@ class ChatViewModel @Inject constructor(
                 modelRepository.updateModelState(ModelState.NOT_DOWNLOADED)
                 _downloadProgress.value = 0
                 _downloadedMB.value = 0
-                _totalMB.value = Constants.ModelDownload.MODEL_SIZE_MB
+                val model = modelRepository.getSelectedModel()
+                _totalMB.value = model.sizeMb
 
                 userPreferencesRepository.clearActiveDownloadId()
 
-                val modelFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), Constants.ModelDownload.MODEL_FILE_NAME)
+                val modelFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), model.fileName)
                 if (modelFile.exists()) {
                     modelFile.delete()
                 }

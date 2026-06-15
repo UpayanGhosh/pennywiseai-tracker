@@ -24,6 +24,10 @@ class LlmRepository @Inject constructor(
     private val aiContextRepository: AiContextRepository,
     private val userPreferencesRepository: UserPreferencesRepository
 ) {
+    // Id of the model the LiteRT engine is currently loaded with, so we can tear
+    // it down and reload when the user switches models mid-session.
+    private var loadedModelId: String? = null
+
     fun getAllMessages(): Flow<List<ChatMessage>> = chatDao.getAllMessages()
 
     fun getAllMessagesIncludingSystem(): Flow<List<ChatMessage>> = chatDao.getAllMessagesIncludingSystem()
@@ -133,9 +137,16 @@ class LlmRepository @Inject constructor(
     }
 
     private suspend fun ensureConversation() {
+        val selectedModel = modelRepository.getSelectedModel()
+        // If the engine is loaded with a different model than the one now selected,
+        // tear it down so it re-initializes with the chosen model.
+        if (llmService.isInitialized() && loadedModelId != selectedModel.id) {
+            llmService.reset()
+        }
+
         // Initialize engine if needed
         if (!llmService.isInitialized()) {
-            val modelFile = modelRepository.getModelFile()
+            val modelFile = modelRepository.getModelFile(selectedModel)
             if (!modelFile.exists()) {
                 throw Exception("Model not downloaded. Please download from Settings.")
             }
@@ -144,6 +155,7 @@ class LlmRepository @Inject constructor(
             if (initResult.isFailure) {
                 throw initResult.exceptionOrNull() ?: Exception("Failed to initialize LLM")
             }
+            loadedModelId = selectedModel.id
         }
 
         // Create conversation if needed, replaying history from Room DB

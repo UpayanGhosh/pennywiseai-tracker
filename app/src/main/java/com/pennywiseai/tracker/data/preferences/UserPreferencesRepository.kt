@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.pennywiseai.tracker.core.LlmModelRegistry
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -60,6 +61,7 @@ class UserPreferencesRepository @Inject constructor(
         val SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
         val HAS_SHOWN_SCAN_TUTORIAL = booleanPreferencesKey("has_shown_scan_tutorial")
         val ACTIVE_DOWNLOAD_ID = longPreferencesKey("active_download_id")
+        val SELECTED_MODEL_ID = stringPreferencesKey("selected_model_id")
         val SMS_SCAN_MONTHS = intPreferencesKey("sms_scan_months")
         val SMS_SCAN_ALL_TIME = booleanPreferencesKey("sms_scan_all_time")
         val LAST_SCAN_TIMESTAMP = longPreferencesKey("last_scan_timestamp")
@@ -276,6 +278,27 @@ class UserPreferencesRepository @Inject constructor(
     suspend fun clearActiveDownloadId() {
         context.dataStore.edit { preferences ->
             preferences.remove(PreferencesKeys.ACTIVE_DOWNLOAD_ID)
+        }
+    }
+
+    /**
+     * Id of the LLM the user picked to download/use. Falls back to the default
+     * model's id (Qwen) when unset, so existing installs keep their model.
+     */
+    val selectedModelId: Flow<String> = context.dataStore.data
+        .map { preferences ->
+            preferences[PreferencesKeys.SELECTED_MODEL_ID] ?: LlmModelRegistry.DEFAULT.id
+        }
+
+    suspend fun getSelectedModelId(): String {
+        return context.dataStore.data
+            .map { preferences -> preferences[PreferencesKeys.SELECTED_MODEL_ID] ?: LlmModelRegistry.DEFAULT.id }
+            .first()
+    }
+
+    suspend fun setSelectedModelId(id: String) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.SELECTED_MODEL_ID] = id
         }
     }
     
